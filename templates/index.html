@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>JobTread Assistant</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #f0f2f5;
+      height: 100dvh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    header {
+      background: #1a56db;
+      color: #fff;
+      padding: 14px 20px;
+      font-size: 1.1rem;
+      font-weight: 600;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-shrink: 0;
+    }
+
+    header span { font-size: 1.4rem; }
+
+    #messages {
+      flex: 1;
+      overflow-y: auto;
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .bubble {
+      max-width: min(75%, 640px);
+      padding: 12px 16px;
+      border-radius: 18px;
+      line-height: 1.5;
+      font-size: 0.95rem;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    .bubble.user {
+      background: #1a56db;
+      color: #fff;
+      align-self: flex-end;
+      border-bottom-right-radius: 4px;
+    }
+
+    .bubble.assistant {
+      background: #fff;
+      color: #111;
+      align-self: flex-start;
+      border-bottom-left-radius: 4px;
+      box-shadow: 0 1px 3px rgba(0,0,0,.1);
+    }
+
+    .bubble.tool-call {
+      background: #e8f0fe;
+      color: #3c4a6e;
+      align-self: flex-start;
+      font-size: 0.82rem;
+      font-style: italic;
+      padding: 8px 14px;
+      border-radius: 10px;
+    }
+
+    /* Basic markdown rendering */
+    .bubble.assistant h1, .bubble.assistant h2, .bubble.assistant h3 {
+      margin: 8px 0 4px;
+      font-weight: 600;
+    }
+    .bubble.assistant p { margin-bottom: 6px; }
+    .bubble.assistant ul, .bubble.assistant ol { padding-left: 20px; margin-bottom: 6px; }
+    .bubble.assistant code {
+      background: #f3f4f6;
+      padding: 2px 5px;
+      border-radius: 4px;
+      font-size: 0.88em;
+      font-family: "SF Mono", Menlo, monospace;
+    }
+    .bubble.assistant pre {
+      background: #1e2130;
+      color: #e2e8f0;
+      padding: 12px;
+      border-radius: 8px;
+      overflow-x: auto;
+      margin: 8px 0;
+    }
+    .bubble.assistant pre code { background: none; color: inherit; padding: 0; }
+    .bubble.assistant strong { font-weight: 600; }
+    .bubble.assistant em { font-style: italic; }
+
+    #input-area {
+      background: #fff;
+      border-top: 1px solid #e5e7eb;
+      padding: 12px 16px;
+      display: flex;
+      gap: 10px;
+      align-items: flex-end;
+      flex-shrink: 0;
+    }
+
+    #user-input {
+      flex: 1;
+      border: 1px solid #d1d5db;
+      border-radius: 12px;
+      padding: 10px 14px;
+      font-size: 0.95rem;
+      resize: none;
+      outline: none;
+      max-height: 140px;
+      line-height: 1.4;
+      font-family: inherit;
+    }
+
+    #user-input:focus { border-color: #1a56db; }
+
+    #send-btn {
+      background: #1a56db;
+      color: #fff;
+      border: none;
+      border-radius: 12px;
+      width: 44px;
+      height: 44px;
+      font-size: 1.2rem;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+      transition: background 0.15s;
+    }
+
+    #send-btn:disabled { background: #93c5fd; cursor: not-allowed; }
+    #send-btn:not(:disabled):hover { background: #1e429f; }
+
+    .typing { display: flex; gap: 4px; padding: 4px 0; }
+    .typing span {
+      width: 7px; height: 7px; background: #9ca3af;
+      border-radius: 50%; animation: bounce 1.2s infinite;
+    }
+    .typing span:nth-child(2) { animation-delay: 0.2s; }
+    .typing span:nth-child(3) { animation-delay: 0.4s; }
+    @keyframes bounce {
+      0%, 80%, 100% { transform: translateY(0); }
+      40% { transform: translateY(-6px); }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <span>🔨</span> JobTread Assistant
+  </header>
+
+  <div id="messages">
+    <div class="bubble assistant">
+      Hi! I'm your JobTread assistant. Ask me anything about your jobs, contacts, to-dos, and more — or tell me to make changes and I'll handle it.
+    </div>
+  </div>
+
+  <div id="input-area">
+    <textarea id="user-input" rows="1" placeholder="Ask me about your JobTread data…"></textarea>
+    <button id="send-btn" title="Send">&#9654;</button>
+  </div>
+
+  <script>
+    // ---- Simple markdown renderer ----
+    function renderMarkdown(text) {
+      return text
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        // code blocks
+        .replace(/```[\w]*\n?([\s\S]*?)```/g, '<pre><code>$1</code></pre>')
+        // inline code
+        .replace(/`([^`]+)`/g, '<code>$1</code>')
+        // bold
+        .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+        // italic
+        .replace(/\*(.+?)\*/g, '<em>$1</em>')
+        // headers
+        .replace(/^### (.+)$/gm, '<h3>$1</h3>')
+        .replace(/^## (.+)$/gm, '<h2>$1</h2>')
+        .replace(/^# (.+)$/gm, '<h1>$1</h1>')
+        // unordered lists
+        .replace(/^\s*[-*] (.+)$/gm, '<li>$1</li>')
+        .replace(/(<li>.*<\/li>)/s, '<ul>$1</ul>')
+        // paragraphs (double newline)
+        .replace(/\n\n/g, '</p><p>')
+        // single newlines
+        .replace(/\n/g, '<br>');
+    }
+
+    const messagesEl = document.getElementById('messages');
+    const inputEl = document.getElementById('user-input');
+    const sendBtn = document.getElementById('send-btn');
+
+    // Conversation history sent to server
+    let history = [];
+
+    function scrollToBottom() {
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+    }
+
+    function addBubble(cls, html, raw = false) {
+      const div = document.createElement('div');
+      div.className = `bubble ${cls}`;
+      if (raw) div.innerHTML = html;
+      else div.textContent = html;
+      messagesEl.appendChild(div);
+      scrollToBottom();
+      return div;
+    }
+
+    // Auto-resize textarea
+    inputEl.addEventListener('input', () => {
+      inputEl.style.height = 'auto';
+      inputEl.style.height = Math.min(inputEl.scrollHeight, 140) + 'px';
+    });
+
+    inputEl.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+    });
+    sendBtn.addEventListener('click', send);
+
+    async function send() {
+      const text = inputEl.value.trim();
+      if (!text || sendBtn.disabled) return;
+
+      addBubble('user', text);
+      history.push({ role: 'user', content: text });
+
+      inputEl.value = '';
+      inputEl.style.height = 'auto';
+      sendBtn.disabled = true;
+
+      // Typing indicator
+      const typingDiv = document.createElement('div');
+      typingDiv.className = 'bubble assistant';
+      typingDiv.innerHTML = '<div class="typing"><span></span><span></span><span></span></div>';
+      messagesEl.appendChild(typingDiv);
+      scrollToBottom();
+
+      let assistantBubble = null;
+      let assistantText = '';
+
+      try {
+        const res = await fetch('/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ messages: history }),
+        });
+
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const parts = buffer.split('\n\n');
+          buffer = parts.pop();
+
+          for (const part of parts) {
+            if (!part.startsWith('data: ')) continue;
+            const payload = JSON.parse(part.slice(6));
+
+            if (payload.type === 'text') {
+              if (typingDiv.parentNode) typingDiv.remove();
+              if (!assistantBubble) {
+                assistantBubble = document.createElement('div');
+                assistantBubble.className = 'bubble assistant';
+                messagesEl.appendChild(assistantBubble);
+              }
+              assistantText += payload.content;
+              assistantBubble.innerHTML = renderMarkdown(assistantText);
+              scrollToBottom();
+            } else if (payload.type === 'tool_call') {
+              if (typingDiv.parentNode) typingDiv.remove();
+              addBubble('tool-call', `⚙ ${payload.description}`, false);
+            } else if (payload.type === 'done') {
+              if (typingDiv.parentNode) typingDiv.remove();
+            }
+          }
+        }
+      } catch (err) {
+        if (typingDiv.parentNode) typingDiv.remove();
+        addBubble('assistant', `Error: ${err.message}`);
+      }
+
+      if (assistantText) {
+        history.push({ role: 'assistant', content: assistantText });
+      }
+
+      sendBtn.disabled = false;
+      inputEl.focus();
+    }
+  </script>
+</body>
+</html>
