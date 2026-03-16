@@ -189,6 +189,32 @@ def chat():
     return Response(stream_with_context(generate()), mimetype="text/event-stream")
 
 
+@app.route("/debug")
+def debug():
+    """Hit http://localhost:5000/debug to see the raw API response."""
+    import requests as req
+    api_key = os.getenv("JOBTREAD_API_KEY")
+    url = os.getenv("JOBTREAD_API_URL", "https://api.jobtread.com/pave")
+    try:
+        r = req.post(
+            url,
+            json={"query": "{ __typename }"},
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {api_key}",
+            },
+            timeout=10,
+        )
+        return jsonify({
+            "url": url,
+            "status_code": r.status_code,
+            "response_headers": dict(r.headers),
+            "body": r.text,
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
