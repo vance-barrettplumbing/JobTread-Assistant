@@ -1,8 +1,24 @@
 """
-JobTread GraphQL API client.
+JobTread Pave API client.
+
+Pave is a JSON-based query language used by JobTread. Queries are JSON objects,
+not GraphQL strings. Authentication uses grantKey inside the query's $ input,
+not an HTTP Authorization header.
+
+Example query:
+    {
+        "$": { "grantKey": "..." },
+        "organization": {
+            "$": { "id": "abc123" },
+            "id": {},
+            "name": {},
+            "jobs": {
+                "nodes": { "id": {}, "name": {}, "number": {} }
+            }
+        }
+    }
 """
 import os
-import json
 import requests
 from typing import Any, Optional
 
@@ -11,110 +27,72 @@ JOBTREAD_API_URL = os.getenv("JOBTREAD_API_URL", "https://api.jobtread.com/pave"
 
 
 class JobTreadClient:
-    def __init__(self, api_key: str, api_url: str = JOBTREAD_API_URL):
+    def __init__(self, grant_key: str, api_url: str = JOBTREAD_API_URL):
+        self.grant_key = grant_key
         self.api_url = api_url
         self.session = requests.Session()
-        self.session.headers.update({
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {api_key}",
-        })
+        self.session.headers.update({"Content-Type": "application/json"})
 
-    def query(self, query: str, variables: Optional[dict] = None) -> dict:
-        """Execute a GraphQL query or mutation."""
-        payload: dict[str, Any] = {"query": query}
-        if variables:
-            payload["variables"] = variables
+    def query(self, pave_query: dict, variables: Optional[dict] = None) -> dict:
+        """
+        Execute a Pave query.
 
-        response = self.session.post(self.api_url, json=payload)
-        response.raise_for_status()
+        pave_query should be the query object WITHOUT the top-level $ grantKey —
+        that is injected automatically. Example:
+
+            client.query({
+                "organization": {
+                    "$": { "id": "abc123" },
+                    "id": {},
+                    "name": {}
+                }
+            })
+        """
+        # Inject grantKey at the top level
+        full_query: dict[str, Any] = {
+            "$": {"grantKey": self.grant_key},
+            **pave_query,
+        }
+        payload = {"query": full_query}
+
+        response = self.session.post(self.api_url, json=payload, timeout=30)
+
+        # Surface HTTP errors with the response body for easier debugging
+        if not response.ok:
+            raise PaveError(f"HTTP {response.status_code}: {response.text[:500]}")
+
         result = response.json()
 
-        if "errors" in result:
-            raise GraphQLError(result["errors"])
+        if isinstance(result, dict) and "errors" in result:
+            raise PaveError(str(result["errors"]))
 
-        return result.get("data", {})
+        return result
 
-    def introspect_schema(self) -> dict:
-        """Fetch the full GraphQL schema via introspection."""
-        introspection_query = """
-        query IntrospectionQuery {
-          __schema {
-            queryType { name }
-            mutationType { name }
-            types {
-              kind
-              name
-              description
-              fields(includeDeprecated: false) {
-                name
-                description
-                args {
-                  name
-                  description
-                  type { ...TypeRef }
-                  defaultValue
-                }
-                type { ...TypeRef }
-              }
-              inputFields {
-                name
-                description
-                type { ...TypeRef }
-                defaultValue
-              }
-              enumValues(includeDeprecated: false) {
-                name
-                description
-              }
+    def get_current_grant(self) -> dict:
+        """Return current grant info including org memberships."""
+        return self.query({
+            "currentGrant": {
+                "id": {},
+                "user": {
+                    "id": {},
+                    "name": {},
+                    "memberships": {
+                        "nodes": {
+                            "id": {},
+                            "organization": {
+                                "id": {},
+                                "name": {},
+                            },
+                        }
+                    },
+                },
             }
-          }
-        }
-        fragment TypeRef on __Type {
-          kind
-          name
-          ofType {
-            kind
-            name
-            ofType {
-              kind
-              name
-              ofType {
-                kind
-                name
-              }
-            }
-          }
-        }
-        """
-        return self.query(introspection_query)
-
-    def get_top_level_fields(self) -> dict:
-        """Get available query and mutation fields (lighter than full introspection)."""
-        q = """
-        {
-          __schema {
-            queryType {
-              fields {
-                name
-                description
-                args { name description type { kind name ofType { kind name } } }
-              }
-            }
-            mutationType {
-              fields {
-                name
-                description
-                args { name description type { kind name ofType { kind name } } }
-              }
-            }
-          }
-        }
-        """
-        return self.query(q)
+        })
 
 
-class GraphQLError(Exception):
-    def __init__(self, errors: list):
-        messages = "; ".join(e.get("message", str(e)) for e in errors)
-        super().__init__(f"GraphQL errors: {messages}")
-        self.errors = errors
+class PaveError(Exception):
+    pass
+
+
+# Keep old name for compatibility
+GraphQLError = PaveError

@@ -9,7 +9,7 @@ import json
 from flask import Flask, render_template, request, jsonify, Response, stream_with_context
 from dotenv import load_dotenv
 import anthropic
-from jobtread_client import JobTreadClient, GraphQLError
+from jobtread_client import JobTreadClient, PaveError
 
 load_dotenv()
 
@@ -20,45 +20,98 @@ app = Flask(__name__)
 # ---------------------------------------------------------------------------
 _jt_client: JobTreadClient | None = None
 _ai_client: anthropic.Anthropic | None = None
-_schema_summary: str = ""
+_org_id: str = ""
+_org_name: str = ""
 _tools: list = []
 
-SYSTEM_PROMPT = """You are a helpful assistant for JobTread, a construction management platform.
-You have access to the JobTread API via GraphQL and can:
-- Query jobs, contacts, to-dos, tasks, budgets, expenses, documents, and more
-- Create, update, and manage records in JobTread
+SYSTEM_PROMPT_TEMPLATE = """You are a helpful assistant for JobTread, a construction management platform.
+You can query and modify any data in JobTread using the `run_jobtread_query` tool.
 
-When the user asks a question about their JobTread data or asks you to make changes,
-use the `run_jobtread_query` tool to fetch or mutate data.
+## Organization
+- Organization name: {org_name}
+- Organization ID: {org_id}  ← use this for all queries requiring organizationId
 
-Guidelines:
-- Always confirm destructive changes (deletions, status changes) before executing
-- When listing items, show the most relevant fields (id, name, status, dates)
-- For ambiguous requests, ask for clarification before acting
-- Present data in a clean, readable format using markdown
-- If a query fails, explain what went wrong and suggest alternatives
+## Pave Query Language
+JobTread uses a JSON-based query language called Pave (NOT GraphQL strings).
+
+**Field selection** — return a field by setting it to `{{}}`:
+```json
+{{"organization": {{"$": {{"id": "{org_id}"}}, "id": {{}}, "name": {{}}}}}}
+```
+
+**Inputs** — pass arguments under `$` at the same level as the fields you want:
+```json
+{{"job": {{"$": {{"id": "JOB_ID"}}, "id": {{}}, "name": {{}}, "number": {{}}}}}}
+```
+
+**Nested/connection fields** — query sub-objects the same way:
+```json
+{{"organization": {{
+  "$": {{"id": "{org_id}"}},
+  "jobs": {{
+    "nextPage": {{}},
+    "nodes": {{"id": {{}}, "name": {{}}, "number": {{}}, "closedOn": {{}}}}
+  }}
+}}}}
+```
+
+**Pagination** — add `size` and `page` to `$`, query `nextPage`:
+```json
+{{"$": {{"size": 20, "page": null}}, "nodes": {{"id": {{}}, "name": {{}}}}}}
+```
+
+**Filtering** — use `where` in `$`:
+```json
+{{"$": {{"where": [["status", "=", "active"]]}}, "nodes": {{"id": {{}}, "name": {{}}}}}}
+```
+
+**Sorting**:
+```json
+{{"$": {{"sortBy": [{{"field": "name"}}]}}, "nodes": {{"id": {{}}, "name": {{}}}}}}
+```
+
+## Key Operations
+- `organization($: {{id}})` — org data; has `.jobs`, `.accounts`, `.contacts`, `.documents`, `.tasks`, `.locations`, `.customFields`, etc.
+- `job($: {{id}})` — single job; has `.documents`, `.tasks`, `.costItems`, `.comments`, `.files`, etc.
+- `account($: {{id}})` — customer/vendor
+- `contact($: {{id}})` — contact person
+- `task($: {{id}})` — task or to-do
+- `document($: {{id}})` — invoice, order, bid, etc.
+- `createJob`, `updateJob`, `deleteJob`
+- `createTask`, `updateTask`, `deleteTask`
+- `createAccount`, `updateAccount`, `deleteAccount`
+- `createContact`, `updateContact`, `deleteContact`
+- `createDocument`, `updateDocument`
+- `createComment`, `updateComment`
+- `currentGrant` — who is authenticated
+
+## Rules
+- Always include `id: {{}}` for every object you request (required by the API)
+- Confirm before any destructive action (delete, status change)
+- Present results in clean markdown
+- For to-dos, use `tasks` with `isToDo: true` filter
 """
 
 
-def build_tools(schema_summary: str) -> list:
+def build_tools(org_id: str) -> list:
     return [
         {
             "name": "run_jobtread_query",
             "description": (
-                "Execute a GraphQL query or mutation against the JobTread API. "
-                "Use this for all data retrieval and modifications.\n\n"
-                f"Available schema:\n{schema_summary}"
+                "Execute a Pave query or mutation against the JobTread API. "
+                "Pass a JSON object (not a GraphQL string) as the query. "
+                "The grantKey is injected automatically — do not include it. "
+                f"Organization ID is: {org_id}"
             ),
             "input_schema": {
                 "type": "object",
                 "properties": {
                     "query": {
-                        "type": "string",
-                        "description": "The GraphQL query or mutation string",
-                    },
-                    "variables": {
                         "type": "object",
-                        "description": "Optional GraphQL variables",
+                        "description": (
+                            "The Pave query as a JSON object. Example: "
+                            '{"organization": {"$": {"id": "ORG_ID"}, "id": {}, "name": {}}}'
+                        ),
                     },
                     "description": {
                         "type": "string",
@@ -71,45 +124,38 @@ def build_tools(schema_summary: str) -> list:
     ]
 
 
-def summarize_schema(schema_data: dict) -> str:
-    schema = schema_data.get("__schema", {})
-    lines = []
-    qt = schema.get("queryType", {})
-    mt = schema.get("mutationType", {})
-    if qt and qt.get("fields"):
-        lines.append("## Queries")
-        for f in qt["fields"]:
-            args = ", ".join(a["name"] for a in f.get("args", []))
-            lines.append(f"- `{f['name']}({args})` — {f.get('description', '')}")
-    if mt and mt.get("fields"):
-        lines.append("\n## Mutations")
-        for f in mt["fields"]:
-            args = ", ".join(a["name"] for a in f.get("args", []))
-            lines.append(f"- `{f['name']}({args})` — {f.get('description', '')}")
-    return "\n".join(lines) if lines else "Schema unavailable."
-
-
 def init_clients():
-    global _jt_client, _ai_client, _schema_summary, _tools
+    global _jt_client, _ai_client, _org_id, _org_name, _tools
 
-    api_key = os.getenv("JOBTREAD_API_KEY")
+    grant_key = os.getenv("JOBTREAD_API_KEY")
     anthropic_key = os.getenv("ANTHROPIC_API_KEY")
 
-    if not api_key or not anthropic_key:
+    if not grant_key or not anthropic_key:
         raise RuntimeError("JOBTREAD_API_KEY and ANTHROPIC_API_KEY must be set in .env")
 
-    _jt_client = JobTreadClient(api_key)
+    _jt_client = JobTreadClient(grant_key)
     _ai_client = anthropic.Anthropic(api_key=anthropic_key)
 
+    # Discover org ID from the grant
     try:
-        schema_data = _jt_client.get_top_level_fields()
-        _schema_summary = summarize_schema(schema_data)
-        print("✓ JobTread schema loaded")
+        result = _jt_client.get_current_grant()
+        memberships = (
+            result.get("currentGrant", {})
+                  .get("user", {})
+                  .get("memberships", {})
+                  .get("nodes", [])
+        )
+        if memberships:
+            org = memberships[0].get("organization", {})
+            _org_id = org.get("id", "")
+            _org_name = org.get("name", "")
+            print(f"✓ Connected to JobTread org: {_org_name} ({_org_id})")
+        else:
+            print("⚠ No organization memberships found on this grant")
     except Exception as e:
-        _schema_summary = "Schema unavailable — use standard JobTread GraphQL types."
-        print(f"⚠ Could not load schema: {e}")
+        print(f"⚠ Could not fetch org info: {e}")
 
-    _tools = build_tools(_schema_summary)
+    _tools = build_tools(_org_id)
 
 
 # ---------------------------------------------------------------------------
@@ -126,6 +172,8 @@ def chat():
     data = request.json
     messages = data.get("messages", [])
 
+    system = SYSTEM_PROMPT_TEMPLATE.format(org_id=_org_id, org_name=_org_name)
+
     def generate():
         conversation = list(messages)
 
@@ -133,7 +181,7 @@ def chat():
             response = _ai_client.messages.create(
                 model="claude-opus-4-6",
                 max_tokens=4096,
-                system=SYSTEM_PROMPT,
+                system=system,
                 tools=_tools,
                 messages=conversation,
             )
@@ -141,7 +189,6 @@ def chat():
             assistant_content = response.content
             conversation.append({"role": "assistant", "content": assistant_content})
 
-            # Stream text blocks to the client
             for block in assistant_content:
                 if block.type == "text" and block.text:
                     yield f"data: {json.dumps({'type': 'text', 'content': block.text})}\n\n"
@@ -150,7 +197,6 @@ def chat():
                 yield f"data: {json.dumps({'type': 'done'})}\n\n"
                 break
 
-            # Execute tool calls
             tool_results = []
             for block in assistant_content:
                 if block.type != "tool_use":
@@ -160,20 +206,17 @@ def chat():
                 yield f"data: {json.dumps({'type': 'tool_call', 'description': desc})}\n\n"
 
                 try:
-                    result = _jt_client.query(
-                        block.input["query"],
-                        block.input.get("variables"),
-                    )
+                    result = _jt_client.query(block.input["query"])
                     tool_results.append({
                         "type": "tool_result",
                         "tool_use_id": block.id,
                         "content": json.dumps(result),
                     })
-                except GraphQLError as e:
+                except PaveError as e:
                     tool_results.append({
                         "type": "tool_result",
                         "tool_use_id": block.id,
-                        "content": f"GraphQL Error: {e}",
+                        "content": f"Pave Error: {e}",
                         "is_error": True,
                     })
                 except Exception as e:
@@ -191,47 +234,18 @@ def chat():
 
 @app.route("/debug")
 def debug():
-    """Hit http://localhost:5000/debug to test different query formats."""
-    import requests as req
-    api_key = os.getenv("JOBTREAD_API_KEY")
-    url = os.getenv("JOBTREAD_API_URL", "https://api.jobtread.com/pave")
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {api_key}",
-    }
-
-    formats = [
-        # Nested keys as field selectors with true
-        {"label": "true_values", "body": {"query": {"organization": {"id": True, "name": True}}}},
-        # Nested keys as field selectors with empty dict
-        {"label": "empty_dict",  "body": {"query": {"organization": {"id": {}, "name": {}}}}},
-        # Just request organization with no sub-fields
-        {"label": "bare",        "body": {"query": {"organization": {}}}},
-        # Array of field names under "select"
-        {"label": "select",      "body": {"query": {"organization": {"select": ["id", "name"]}}}},
-        # Array of field names under "columns"
-        {"label": "columns",     "body": {"query": {"organization": {"columns": ["id", "name"]}}}},
-    ]
-
-    results = []
-    for fmt in formats:
-        try:
-            r = req.post(url, json=fmt["body"], headers=headers, timeout=10)
-            results.append({
-                "label": fmt["label"],
-                "status": r.status_code,
-                "body": r.text[:300],
-            })
-        except Exception as e:
-            results.append({"label": fmt["label"], "error": str(e)})
-
-    return jsonify(results)
+    """Raw API test — open http://localhost:5000/debug"""
+    try:
+        result = _jt_client.get_current_grant()
+        return jsonify({"ok": True, "org_id": _org_id, "org_name": _org_name, "result": result})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
     init_clients()
-    print("\n🚀 JobTread Assistant running at http://0.0.0.0:5000")
-    print("   Open in browser or share your local IP with your phone\n")
+    print(f"\n🚀 JobTread Assistant running at http://0.0.0.0:5000")
+    print(f"   Org: {_org_name} ({_org_id})\n")
     app.run(host="0.0.0.0", port=5000, debug=False)
