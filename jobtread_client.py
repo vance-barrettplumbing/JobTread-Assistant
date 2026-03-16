@@ -7,7 +7,7 @@ import requests
 from typing import Any, Optional
 
 
-JOBTREAD_API_URL = os.getenv("JOBTREAD_API_URL", "https://api.jobtread.com/papi")
+JOBTREAD_API_URL = os.getenv("JOBTREAD_API_URL", "https://api.jobtread.com/pave")
 
 
 class JobTreadClient:
