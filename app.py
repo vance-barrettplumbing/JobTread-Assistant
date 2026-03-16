@@ -191,28 +191,39 @@ def chat():
 
 @app.route("/debug")
 def debug():
-    """Hit http://localhost:5000/debug to see the raw API response."""
+    """Hit http://localhost:5000/debug to test different query formats."""
     import requests as req
     api_key = os.getenv("JOBTREAD_API_KEY")
     url = os.getenv("JOBTREAD_API_URL", "https://api.jobtread.com/pave")
-    try:
-        r = req.post(
-            url,
-            json={"query": "{ __typename }"},
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {api_key}",
-            },
-            timeout=10,
-        )
-        return jsonify({
-            "url": url,
-            "status_code": r.status_code,
-            "response_headers": dict(r.headers),
-            "body": r.text,
-        })
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}",
+    }
+
+    formats = [
+        # Standard GraphQL
+        {"label": "graphql_string", "body": {"query": "{ organization { id name } }"}},
+        # JSON object style
+        {"label": "json_object", "body": {"query": {"organization": {"fields": ["id", "name"]}}}},
+        # Top-level object key
+        {"label": "data_key", "body": {"data": {"organization": {"fields": ["id", "name"]}}}},
+        # Flat JSON
+        {"label": "flat", "body": {"organization": {"fields": ["id", "name"]}}},
+    ]
+
+    results = []
+    for fmt in formats:
+        try:
+            r = req.post(url, json=fmt["body"], headers=headers, timeout=10)
+            results.append({
+                "label": fmt["label"],
+                "status": r.status_code,
+                "body": r.text[:300],
+            })
+        except Exception as e:
+            results.append({"label": fmt["label"], "error": str(e)})
+
+    return jsonify(results)
 
 
 # ---------------------------------------------------------------------------
