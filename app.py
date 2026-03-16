@@ -201,14 +201,16 @@ def debug():
     }
 
     formats = [
-        # Standard GraphQL
-        {"label": "graphql_string", "body": {"query": "{ organization { id name } }"}},
-        # JSON object style
-        {"label": "json_object", "body": {"query": {"organization": {"fields": ["id", "name"]}}}},
-        # Top-level object key
-        {"label": "data_key", "body": {"data": {"organization": {"fields": ["id", "name"]}}}},
-        # Flat JSON
-        {"label": "flat", "body": {"organization": {"fields": ["id", "name"]}}},
+        # Nested keys as field selectors with true
+        {"label": "true_values", "body": {"query": {"organization": {"id": True, "name": True}}}},
+        # Nested keys as field selectors with empty dict
+        {"label": "empty_dict",  "body": {"query": {"organization": {"id": {}, "name": {}}}}},
+        # Just request organization with no sub-fields
+        {"label": "bare",        "body": {"query": {"organization": {}}}},
+        # Array of field names under "select"
+        {"label": "select",      "body": {"query": {"organization": {"select": ["id", "name"]}}}},
+        # Array of field names under "columns"
+        {"label": "columns",     "body": {"query": {"organization": {"columns": ["id", "name"]}}}},
     ]
 
     results = []
