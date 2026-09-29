@@ -65,11 +65,13 @@ or a filled-in copy of his estimator workbook. Read attachments first; only ask 
    interceptor, RPZ/PRV, compressed air, roof drains, anything the estimator has no row for (see Step 3).
 5. **Defaults** — list back in one line so Vance can correct any:
    complexity Normal · wall type from plans (CMU Block if block) · slab on grade Y · hanger Single Clevis ·
-   water pipe Type L copper (or PEX-B) · crew 2 plumbers × 8 hr · plan confidence High (5% buffer) ·
+   water pipe Type L Copper (or Type K Copper / PEX-B — this changes the water labor rates) · crew 2 plumbers × 8 hr ·
+   plan confidence High (5% buffer) ·
    PM-Commercial 1 hr per phase (template) · no Travel Charge · quoted items at their cost-type margin.
 
-## Step 3: Estimate labor hours with the v3 estimator
-Labor hours come from Vance's estimator, bundled as `BP_Commercial_Estimator_v3.xlsx`. `scripts/labor_estimate.py`
+## Step 3: Estimate labor hours with the v3.1 estimator
+Labor hours come from Vance's estimator, bundled as `BP_Commercial_Estimator_v3.1.xlsx` (his v3 with its formula
+bugs fixed — see the workbook's "CHANGES v3.1" sheet). `scripts/labor_estimate.py`
 reproduces its labor math exactly (PIPE ESTIMATE, FIXTURE ESTIMATE incl. hangers, CMU drops, SLEEVE SCHEDULE,
 DEMO ESTIMATE → SUMMARY hours) and reads every rate — and the row-to-rate wiring — live from the workbook, so
 use the script rather than doing the math by hand, and never hard-code table values into this skill. If Vance
@@ -83,7 +85,7 @@ python3 <skill-dir>/scripts/labor_estimate.py --from-xlsx /path/to/his_estimate.
 unambiguous prefix of the sheet's row name):
 ```bash
 cat > /tmp/labor.json <<'JSON'
-{"wall_type":"CMU Block","complexity":"Normal","hanger_type":"Single Clevis Hanger",
+{"wall_type":"CMU Block","complexity":"Normal","hanger_type":"Single Clevis Hanger","water_material":"Type L Copper",
  "pipe":{"dwv":{"4\"":[120,0,0],"2\"":[0,0,80],"1-1/2\"":[0,0,130]},
          "cold":{"1\"":[0,0,80],"1/2\"":[0,280,120]}},
  "fixtures":{"Water Closet (Flush":6,"Lavatory (Single)":6,"Floor Drain (4":9,"Mop Sink":1,"Cleanout":4},
@@ -105,9 +107,9 @@ Pipe values are `[underground LF, in-wall LF, ceiling LF]` (or `{"ug":..,"wall":
 | EWC / drinking fountain / bottle filler · eyewash | `Drinking Fountain` · `Emergency Eyewash / Shower` |
 | Hose bibb · wall hydrant · roof drain · trap primer | `Hose Bib / Yard Hydrant` · `Wall Hydrant (Non-Freeze)` · `Roof Drain` · `Trap Primer Valve` |
 | Water heater · tankless · expansion tank · T&P/drain · TMV · recirc pump | `Commercial Water Heater (Tank)` · `Tankless Water Heater` · `Expansion Tank Connection` · `Water Heater Drain / Relief` · `Mixing Valve / TMV` · `Recirculation Pump` |
-| RPZ/backflow · PRV · grease interceptor / sand separator | `Backflow Preventer (1" and under)`/`(over 1")` · `PRV Station` · `Grease Interceptor / Sand Separator` |
-Grease interceptor: the sheet counts it as both indoor (6 h) and exterior (12 h) — zero the one that doesn't
-apply, e.g. `"qty_overrides":{"Grease Interceptor (Exterior":0}`. **No estimator row** for showers, gas piping,
+| RPZ/backflow · PRV | `Backflow Preventer (1" and under)`/`(over 1")` · `PRV Station` |
+| Grease interceptor indoor · exterior/in-ground, sand separator | `Grease Interceptor (Indoor)` · `Ext. Grease Interceptor / Sand Sep.` |
+**No estimator row** for showers, gas piping,
 pressure testing/inspection attendance (LABOR TABLES Table G is unused), roof-drain leaders, etc. — ask Vance for
 hours and add them with `extra_hours` (never estimate them yourself).
 
@@ -131,11 +133,11 @@ sheet's SUMMARY hours, the takeoff quantities for Step 5, the contingency % tabl
 Also show the phase-detail lines, the SUMMARY line, key inputs, and every ⚠ warning. User-supplied hours
 override the script; changed inputs → rerun.
 
-**Known v3 workbook quirks** (the script handles them and warns; mention them when they affect the numbers):
-PIPE DEMO TOTAL double-counts Cast Iron/PVC/Copper demo (its SUM range includes the subtotal rows) — Demo labor
-uses each row once · cap/stub hours are costed but left out of the sheet's hour total — included in Demo ·
-recirc LF has no labor (no PIPE ESTIMATE section) · water pipe labor always uses Type L copper rates · hanger
-hours use FIXTURE ESTIMATE C48:C52, not LABOR TABLES Table F · SETTINGS B32 crew-days leave out CMU/sleeve hours.
+**Older v3 copies.** If Vance sends a filled-in copy of his original v3, the script still reads it. It shows
+that sheet's own totals and warns where v3 was wrong: pipe demo double-counted, cap/stub hours missing from the
+hours, one grease interceptor charged as indoor + exterior (zero one with
+`"qty_overrides":{"Grease Interceptor (Exterior":0}`), recirc LF with no labor, and water labor always at
+Type L copper rates. JobTread phases always use the corrected hours. Suggest he move to v3.1.
 
 ## Step 4: Fetch the live template (1–2 pages of items)
 ```json
@@ -302,5 +304,6 @@ Offer adjustments ("+20 rough-in hours", "WC-1 quote came in at $412", "move sle
 - `isTaxable`: copy from template (permits, labor, mobilization and PM are non-taxable).
 - Always pass `organizationCostItemId` for catalog items so budget lines stay linked to the catalog.
 - Retainage and AIA billing are job settings (create-job), not budget lines.
-- Labor estimator: `BP_Commercial_Estimator_v3.xlsx` + `scripts/labor_estimate.py` (verified against the
-  LibreOffice-recalculated workbook on the sample job and 40 randomized jobs, 2026-09-29). Needs `openpyxl`.
+- Labor estimator: `BP_Commercial_Estimator_v3.1.xlsx` + `scripts/labor_estimate.py` (verified against the
+  LibreOffice-recalculated workbook on the sample job and 30 randomized jobs, plus 50 on the original v3,
+  2026-09-29). Needs `openpyxl`.

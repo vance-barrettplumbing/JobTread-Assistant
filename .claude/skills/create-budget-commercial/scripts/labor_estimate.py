@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Barrett Plumbing commercial labor-hours estimator (mirrors BP_Commercial_Estimator_v3.xlsx).
+"""Barrett Plumbing commercial labor-hours estimator (mirrors BP_Commercial_Estimator_v3.1.xlsx).
 
 Reproduces the workbook's labor math (PIPE ESTIMATE, FIXTURE ESTIMATE incl. hangers, CMU drops,
 SLEEVE SCHEDULE, DEMO ESTIMATE = every line of SUMMARY "LABOR HOURS SUMMARY"), then splits the
@@ -9,6 +9,8 @@ quantities (pipe LF, hangers, rod, beam clamps, sleeves) used for material lines
 All rates and constants are read live from the workbook, and the wiring (which takeoff row uses
 which LABOR TABLES row, which fixture uses which Table D/E hours, hanger spacing) is parsed from
 the sheet's own formulas, so when Vance edits the workbook the script follows automatically.
+Older v3 copies (e.g. a filled-in estimate Vance sends) still work; their known quirks are reproduced
+for the sheet totals and flagged in the warnings.
 
 Usage:
   python3 labor_estimate.py config.json [--xlsx PATH] [--format md|json]
@@ -29,7 +31,7 @@ import argparse, json, math, os, re, sys
 import openpyxl
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-DEFAULT_XLSX = os.path.join(HERE, '..', 'BP_Commercial_Estimator_v3.xlsx')
+DEFAULT_XLSX = os.path.join(HERE, '..', 'BP_Commercial_Estimator_v3.1.xlsx')
 DEFAULTS = dict(complexity='Normal', wall_type='CMU Block', slab_on_grade='Y', crew_size=2, shift_hours=8,
                 hanger_type='Single Clevis Hanger', water_material='Type L Copper',
                 pipe={}, fixtures={}, qty_overrides={}, cmu_drops=0, sleeves=[],
@@ -90,8 +92,13 @@ class Book:
         x = self.f[sh][ref].value
         if isinstance(x, str) and x.startswith('='):
             cached = self.v[sh][ref].value
-            if cached is None and re.fullmatch(r'=[\d.\s+\-*/()]+', x):
-                cached = eval(x[1:])   # plain arithmetic such as "=66.14 + 42"
+            if cached is None:   # no cached value: evaluate plain arithmetic or a single-cell link
+                f = x.replace('$', '')
+                m = re.fullmatch(r"=(?:(?:'([^']+)'|(\w+))!)?([A-Z]+\d+)", f)
+                if re.fullmatch(r'=[\d.\s+\-*/()]+', f):
+                    cached = eval(f[1:])   # e.g. "=66.14 + 42"
+                elif m:
+                    cached = self.val(m.group(1) or m.group(2) or sh, m.group(3))
             return cached
         return x
 
@@ -136,13 +143,24 @@ def load_tables(bk):
         elif cur and a != 'Pipe Size':
             T['systems'][cur].append(dict(row=r, size=a.strip()))
     # labor rate per takeoff row, parsed from PIPE ESTIMATE columns C/D/E
+    # {material: rate}; key None = default. v3.1 water rows point at TABLE B2, whose cells pick the
+    # Type L / Type K / PEX-B row from INPUT E12 with an IF chain; v3 points straight at Type L.
+    def rate_options(ref):
+        f = bk.formula('LABOR TABLES', ref)
+        if not f:
+            return {None: bk.num('LABOR TABLES', ref)}
+        opts = {mat: bk.num('LABOR TABLES', r) for mat, r in re.findall(r'INPUT!E12="([^"]+)",([A-Z]+\d+)', f)}
+        m = re.search(r',([A-Z]+\d+)\)+$', f)
+        opts[None] = bk.num('LABOR TABLES', m.group(1)) if m else bk.num('LABOR TABLES', ref)
+        return opts
     T['pipe_rates'] = {}
     for r in bk.rows('PIPE ESTIMATE'):
         for col, tcol in zip('CDE', 'BCD'):
             f = bk.formula('PIPE ESTIMATE', f'{col}{r}') or ''
-            m = re.search(rf"'PIPE TAKEOFF'!{tcol}(\d+)\*'LABOR TABLES'!([BCD])(\d+)", f)
+            m = re.search(rf"'PIPE TAKEOFF'!{tcol}(\d+)\*'LABOR TABLES'!([A-Z]+\d+)", f)
             if m:
-                T['pipe_rates'].setdefault(int(m.group(1)), {})[tcol] = bk.num('LABOR TABLES', f'{m.group(2)}{m.group(3)}')
+                T['pipe_rates'].setdefault(int(m.group(1)), {})[tcol] = rate_options(m.group(2))
+    T['material_aware'] = any(len(o) > 1 for rt in T['pipe_rates'].values() for o in rt.values())
     # hangers (FIXTURE ESTIMATE hanger block)
     hr = {k: bk.find('FIXTURE ESTIMATE', k) for k in ('Single Clevis', 'Trapeze Assembly (2', 'Trapeze Assembly (3',
                                                        'Threaded Rod', 'Beam Clamp')}
@@ -194,14 +212,24 @@ def load_tables(bk):
                           cap=bk.num('DEMO ESTIMATE', f'G{r}'))
                      for r in range(fd, fe) if bk.formula('DEMO ESTIMATE', f'D{r}')]
     # how the sheet's PIPE DEMO TOTAL (G) adds up: {pipe row: times counted}. v3's SUM(G9:G34) also
-    # covers the Cast Iron / PVC / Copper subtotal rows, so those rows are counted twice.
-    def rng(f):
-        m = re.fullmatch(r'=SUM\(G(\d+):G(\d+)\)', f or '')
-        return range(int(m.group(1)), int(m.group(2)) + 1) if m else range(0)
-    pipe_rows, T['demo_sheet_count'] = {t['row'] for t in T['demo_pipe']}, {}
-    for r in rng(bk.formula('DEMO ESTIMATE', f'G{pe}')):
-        for x in ([r] if r in pipe_rows else [y for y in rng(bk.formula('DEMO ESTIMATE', f'G{r}')) if y in pipe_rows]):
-            T['demo_sheet_count'][x] = T['demo_sheet_count'].get(x, 0) + 1
+    # covers the Cast Iron / PVC / Copper subtotal rows, so those rows are counted twice (v3.1 fixed).
+    pipe_rows = {t['row'] for t in T['demo_pipe']}
+
+    def counted(r, depth=0):
+        if r in pipe_rows:
+            return {r: 1}
+        acc = {}
+        for a, b in re.findall(r'G(\d+)(?::G(\d+))?', bk.formula('DEMO ESTIMATE', f'G{r}') or '') if depth < 4 else []:
+            for x in range(int(a), int(b or a) + 1):
+                for k, v in counted(x, depth + 1).items():
+                    acc[k] = acc.get(k, 0) + v
+        return acc
+    T['demo_sheet_count'] = counted(pe)
+    # v3 left cap/stub hours out of the fixture demo hours (D); v3.1 adds them there
+    T['demo_cap_in_hours'] = any(re.search(rf"G{t['row']}\b", bk.formula('DEMO ESTIMATE', f"D{t['row']}") or '')
+                                 for t in T['demo_fix'])
+    # v3 crew-days (SETTINGS B32) summed some SUMMARY lines; v3.1 uses the SUMMARY total
+    T['crew_days_from_total'] = 'SUMMARY' in (bk.formula('SETTINGS', 'B32') or '')
     return T
 
 
@@ -278,6 +306,15 @@ def estimate(inp, T):
     cx = 1 + adders.get(inp['complexity'], adders.get('Normal', 0))
     po = {norm(k): phase_key(v) for k, v in (inp.get('phase_overrides') or {}).items()}
     slab = str(inp['slab_on_grade']).upper().startswith('Y')
+    mat = norm(inp.get('water_material') or '')
+
+    def pick(opts):
+        if not opts:
+            return 0.0
+        for k, v in opts.items():
+            if k and mat and (norm(k) == mat or norm(k).startswith(mat)):
+                return v
+        return opts[None]
 
     def fixture_phase(label, comp_label):
         n = norm(label)
@@ -301,8 +338,8 @@ def estimate(inp, T):
         for t in rows:
             ug, wall, clg, ovr = inp['pipe'].get(t['row'], (0, 0, 0, None))
             rt = T['pipe_rates'].get(t['row'], {})
-            h_ug = ug * rt.get('B', 0) * cx
-            h_ab = wall * rt.get('C', 0) * cx + clg * rt.get('D', 0) * cx
+            h_ug = ug * pick(rt.get('B')) * cx
+            h_ab = wall * pick(rt.get('C')) * cx + clg * pick(rt.get('D')) * cx
             tot += h_ug + h_ab
             if h_ug:
                 comps.append(('UG', h_ug, f"{SYSTEM_NAMES.get(key, key)} pipe {t['size']} underground"))
@@ -314,9 +351,9 @@ def estimate(inp, T):
                                                           final_lf=final, override=ovr is not None))
             if t['row'] in T['hanger_spacing'] and clg:
                 hanger_pts.setdefault(key, {})[t['size']] = ceil(clg / T['hanger_spacing'][t['row']])
-            if key not in ('dwv', 'cold', 'hot', 'air') and (ug or wall or clg) and not rt:
-                warnings.append(f'{SYSTEM_NAMES.get(key, key)} LF has no labor in the v3 sheet (PIPE ESTIMATE has no '
-                                f'section for it) - hours exclude it; material is still listed.')
+            if (ug or wall or clg) and not rt:
+                warnings.append(f'{SYSTEM_NAMES.get(key, key)} LF has no labor in this workbook (PIPE ESTIMATE has no '
+                                f'section for it; added in v3.1) - hours exclude it; material is still listed.')
         sys_hrs[key] = tot
     # --- hangers (FIXTURE ESTIMATE hanger block) ---
     ht, L = inp['hanger_type'] or '', T['hanger_labels']
@@ -390,21 +427,22 @@ def estimate(inp, T):
     for h, d in ((demo_pipe, 'Pipe demolition'), (demo_fix, 'Fixture demolition'), (cap, 'Cap/stub at removed fixtures')):
         if h:
             comps.append(('DEMO', h, d))
-    if cap:
-        warnings.append(f'{cap:g} cap/stub hrs are costed by the sheet (DEMO ESTIMATE H) but left out of its hour total '
-                        f'(D68); they are included in Demo labor here.')
+    if cap and not T['demo_cap_in_hours']:
+        warnings.append(f'{cap:g} cap/stub hrs are costed by this v3 sheet (DEMO ESTIMATE H) but left out of its hour '
+                        f'total (D68); they are included in Demo labor here.')
     for x in inp.get('extra_hours') or []:
         comps.append((phase_key(x['phase']), float(x['hours']), f"{x['item']} (added)"))
-    if norm(inp['water_material'] or 'type l') and 'type l' not in norm(inp['water_material']) and \
-            (sys_hrs.get('cold') or sys_hrs.get('hot')):
-        warnings.append(f'Water pipe is "{inp["water_material"]}" but the v3 sheet always uses the Type L copper '
-                        f'labor rates for water piping.')
+    if mat and 'type l' not in mat and not T['material_aware'] and (sys_hrs.get('cold') or sys_hrs.get('hot')):
+        warnings.append(f'Water pipe is "{inp["water_material"]}" but this v3 sheet always uses the Type L copper '
+                        f'labor rates for water piping (v3.1 follows the material).')
     # --- roll up: summary mirrors the workbook's SUMMARY sheet; phases are what goes into JobTread ---
-    summary = dict(dwv=sys_hrs.get('dwv', 0), cold=sys_hrs.get('cold', 0), hot=sys_hrs.get('hot', 0), air=sys_hrs.get('air', 0),
-                   cmu=cmu_hrs, fixtures=fix_hrs, hangers=hanger_hrs, sleeves=slv_hrs, demo=sheet_demo_pipe + demo_fix)
+    summary = dict(dwv=sys_hrs.get('dwv', 0), cold=sys_hrs.get('cold', 0), hot=sys_hrs.get('hot', 0),
+                   recirc=sys_hrs.get('recirc', 0), air=sys_hrs.get('air', 0), cmu=cmu_hrs, fixtures=fix_hrs,
+                   hangers=hanger_hrs, sleeves=slv_hrs,
+                   demo=sheet_demo_pipe + demo_fix + (cap if T['demo_cap_in_hours'] else 0))
     total = sum(summary.values())
-    sheet_days = ceil((summary['dwv'] + summary['cold'] + summary['hot'] + summary['air'] + fix_hrs + hanger_hrs
-                       + summary['demo']) / 8)
+    sheet_days = ceil(total / 8) if T['crew_days_from_total'] else \
+        ceil((summary['dwv'] + summary['cold'] + summary['hot'] + summary['air'] + fix_hrs + hanger_hrs + summary['demo']) / 8)
     crew, shift = float(inp['crew_size'] or 2), float(inp['shift_hours'] or 8)
     phases = []
     for p in PHASES:
@@ -443,7 +481,7 @@ def to_md(r):
         if p['detail']:
             out.append(f"- {p['phase']}: " + ' · '.join(f"{d['item']} {fmt(d['hrs'])}" for d in p['detail']))
     s, i = r['summary_hours'], r['inputs']
-    out += ['', f"Estimator SUMMARY hours — DWV {fmt(s['dwv'])} · Cold {fmt(s['cold'])} · Hot {fmt(s['hot'])} · Air {fmt(s['air'])} · "
+    out += ['', f"Estimator SUMMARY hours — DWV {fmt(s['dwv'])} · Cold {fmt(s['cold'])} · Hot {fmt(s['hot'])} · Recirc {fmt(s['recirc'])} · Air {fmt(s['air'])} · "
             f"CMU drops {fmt(s['cmu'])} · Fixtures {fmt(s['fixtures'])} · Hangers {fmt(s['hangers'])} · Sleeves {fmt(s['sleeves'])} · "
             f"Demo {fmt(s['demo'])} = {fmt(r['total_man_hours'])} man-hrs",
             f"Complexity {i['complexity']} ×{fmt(r['complexity_multiplier'])} · wall {i['wall_type']} · slab on grade {i['slab_on_grade']} · "
