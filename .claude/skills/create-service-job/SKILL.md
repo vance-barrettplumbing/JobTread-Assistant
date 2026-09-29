@@ -133,9 +133,9 @@ If `createCostGroup` rejects `lineItems`, create the group without it, then `cre
 | Commercial, standard | Service Call - Trip Charge | Labor - CS |
 | Commercial, emergency | Service Call - Emergency | Labor - CS |
 
-Labor quantity: 1 hour unless the user gives an estimate. Add extra items (materials, CC Service Fee
-`22PAhcMCPwd2`, Warranty Accrual `22PNXBpxPChC`) only if the user asks — look them up in the catalog the
-same way and copy their catalog prices.
+Labor quantity: 1 hour unless the user gives an estimate. **Do NOT add CC Service Fee or Warranty Accrual
+items** to service jobs. Add materials only if the user asks — look them up in the catalog the same way and
+copy their catalog prices.
 
 ---
 

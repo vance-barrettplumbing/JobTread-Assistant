@@ -135,6 +135,7 @@ After the first call, read the job budget back to confirm nesting worked before 
 `createCostItem{costGroupId,...}` per item.
 
 ### Customization rules
+- **No Travel Charge** — do not add Travel Charge items to any phase.
 - **Labor - RU / RR / RF** quantities = Step 3 hours; **Mobilization** in each phase = Step 3 mob hours.
 - **Sewage:** include exactly one of "Sewage Crock, Pump & Check Valve" (basement bath or pump requested) or
   "Crock (Empty-No Pump)".
@@ -168,6 +169,7 @@ target = ROUNDUP(phase price sum × 1.05) to the nearest dollar; Buffer = target
 Create with `createCostItem{costGroupId:<phase labor & materials group id>, name:"Buffer", quantity:1,
 unitCost:0, unitPrice:<buffer>, isTaxable:false, organizationCostItemId:"22PHmgptrrEK",
 costCodeId:"22Nttshd4XSU" (9999 Miscellaneous), costTypeId:"22Nttshd4XSY" (Other), unitId:"22Nttshd4XRq" (Lump Sum)}`.
+**Always 9999 Miscellaneous / Other** — the catalog Buffer item is coded 2000 Materials; override it with these ids.
 
 ### Warranty Accrual (last)
 The template already includes "Warranty Accrual" (1300 Other / Lump Sum) in Finish > Labor & Materials.
